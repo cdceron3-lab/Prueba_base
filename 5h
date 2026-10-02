@@ -75,7 +75,7 @@ def inicializar_base_datos():
                 'regimen': np.random.choice(regimen_list, size=n_rows),
                 'estado_afiliacion': np.random.choice(estado_afi, size=n_rows, p=[0.9, 0.1]),
                 'telefono': [f'3000000{i:03d}' for i in range(n_rows)],
-                'fecha_cita': pd.date_range(start='2026-09-01', periods=n_rows, freq='5H').strftime('%Y-%m-%d'),
+                'fecha_cita': pd.date_range(start='2026-09-01', periods=n_rows, freq='5h').strftime('%Y-%m-%d'),
                 'estado_cita': np.random.choice(estado_cita, size=n_rows, p=[0.70, 0.15, 0.15]),
                 'novedad': np.random.choice(novedad_list, size=n_rows),
                 'profesional': np.random.choice(profesionales, size=n_rows),
