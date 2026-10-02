@@ -20,7 +20,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 @st.cache_resource
 def get_db_engine():
     if DATABASE_URL:
-        url = DATABASE_URL.replace("postgres://", "postgresql://")
+        url = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://")
         return create_engine(url)
     return None
 
