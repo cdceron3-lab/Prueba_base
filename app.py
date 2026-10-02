@@ -1,0 +1,221 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import os
+import io
+from sqlalchemy import create_engine, text
+from datetime import datetime
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+
+st.set_page_config(page_title="IPS Analytics - PostgreSQL", layout="wide")
+
+# ---------------------------------------------------------
+# 1. CONEXIÓN A LA BASE DE DATOS EN RAILWAY
+# ---------------------------------------------------------
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+@st.cache_resource
+def get_db_engine():
+    if DATABASE_URL:
+        url = DATABASE_URL.replace("postgres://", "postgresql://")
+        return create_engine(url)
+    return None
+
+engine = get_db_engine()
+
+# ---------------------------------------------------------
+# 2. INICIALIZACIÓN DE TABLA Y GENERACIÓN DE DATOS FICTICIOS
+# ---------------------------------------------------------
+def inicializar_base_datos():
+    if engine is None:
+        return
+    
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS atenciones (
+                id SERIAL PRIMARY KEY,
+                tipo_documento VARCHAR(10),
+                documento VARCHAR(20),
+                nombre_paciente VARCHAR(100),
+                eps VARCHAR(50),
+                regimen VARCHAR(30),
+                estado_afiliacion VARCHAR(30),
+                telefono VARCHAR(20),
+                fecha_cita DATE,
+                estado_cita VARCHAR(30),
+                novedad VARCHAR(100),
+                profesional VARCHAR(100),
+                edad INT,
+                sexo VARCHAR(10)
+            );
+        """))
+        conn.commit()
+
+        result = conn.execute(text("SELECT COUNT(*) FROM atenciones")).scalar()
+        
+        if result == 0:
+            np.random.seed(42)
+            n_rows = 100
+            eps_list = ['COMPENSAR', 'SURA', 'SANITAS', 'FAMISANAR', 'SALUD TOTAL']
+            regimen_list = ['CONTRIBUTIVO', 'SUBSIDIADO']
+            estado_afi = ['ACTIVO', 'INACTIVO']
+            estado_cita = ['ATENDIDA', 'CANCELADA', 'INASISTENCIA']
+            novedad_list = [None, 'CAMBIO DE HORA', 'DESERCIÓN', None, None]
+            profesionales = ['Dr. Hugo Páez', 'Dra. María Castellanos', 'Dr. Carlos Mendoza', 'Dra. Laura Silva']
+            sexo_list = ['Hombre', 'Mujer']
+
+            df_ficticio = pd.DataFrame({
+                'tipo_documento': ['CC'] * n_rows,
+                'documento': [str(x) for x in np.random.randint(100000, 999999, size=n_rows)],
+                'nombre_paciente': [f'PACIENTE PRUEBA {i+1}' for i in range(n_rows)],
+                'eps': np.random.choice(eps_list, size=n_rows),
+                'regimen': np.random.choice(regimen_list, size=n_rows),
+                'estado_afiliacion': np.random.choice(estado_afi, size=n_rows, p=[0.9, 0.1]),
+                'telefono': [f'3000000{i:03d}' for i in range(n_rows)],
+                'fecha_cita': pd.date_range(start='2026-09-01', periods=n_rows, freq='5H').strftime('%Y-%m-%d'),
+                'estado_cita': np.random.choice(estado_cita, size=n_rows, p=[0.70, 0.15, 0.15]),
+                'novedad': np.random.choice(novedad_list, size=n_rows),
+                'profesional': np.random.choice(profesionales, size=n_rows),
+                'edad': np.random.randint(18, 85, size=n_rows),
+                'sexo': np.random.choice(sexo_list, size=n_rows)
+            })
+            
+            df_ficticio.to_sql('atenciones', con=engine, if_exists='append', index=False)
+
+inicializar_base_datos()
+
+# ---------------------------------------------------------
+# 3. LECTURA DE DATOS DESDE POSTGRESQL
+# ---------------------------------------------------------
+def cargar_datos_db():
+    if engine is not None:
+        return pd.read_sql("SELECT * FROM atenciones", con=engine)
+    return pd.DataFrame()
+
+df = cargar_datos_db()
+
+# ---------------------------------------------------------
+# 4. GENERADOR DE PDF
+# ---------------------------------------------------------
+def generar_pdf(df_filtrado, kpi_atendidas, kpi_inasistencias, kpi_total):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("<b>Reporte Consolidado IPS - PostgreSQL</b>", styles['Title']))
+    story.append(Spacer(1, 15))
+    
+    resumen_text = f"""
+    <b>Resumen General de Operación:</b><br/>
+    • Total Citas Registradas: {kpi_total}<br/>
+    • Citas Atendidas: {kpi_atendidas}<br/>
+    • Inasistencias/Cancelaciones: {kpi_inasistencias}<br/>
+    """
+    story.append(Paragraph(resumen_text, styles['Normal']))
+    story.append(Spacer(1, 15))
+
+    eps_summary = df_filtrado['eps'].value_counts().reset_index()
+    eps_summary.columns = ['EPS', 'Cantidad']
+    
+    tabla_datos = [['EPS', 'Total Citas']] + eps_summary.values.tolist()
+    t = Table(tabla_datos, colWidths=[200, 100])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e3d59")),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey)
+    ]))
+    story.append(t)
+    
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+# ---------------------------------------------------------
+# 5. INTERFAZ Y SIDEBAR
+# ---------------------------------------------------------
+st.title("🏥 Plataforma de Analítica IPS - Conexión PostgreSQL")
+
+with st.sidebar:
+    st.header("⚙️ Configuración & Carga")
+    
+    if not df.empty:
+        output_plantilla = io.BytesIO()
+        with pd.ExcelWriter(output_plantilla, engine='xlsxwriter') as writer:
+            df.head(5).to_excel(writer, sheet_name='PLANTILLA', index=False)
+        
+        st.download_button(
+            label="📥 Descargar Plantilla Excel",
+            data=output_plantilla.getvalue(),
+            file_name="Plantilla_Modelo_IPS.xlsx",
+            mime="application/vnd.ms-excel"
+        )
+    
+    st.divider()
+    
+    uploaded_file = st.file_uploader("📤 Carga Pasiva a Base de Datos (Excel/CSV)", type=['xlsx', 'csv'])
+    if uploaded_file is not None and engine is not None:
+        try:
+            nuevo_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+            nuevo_df.columns = [c.lower().replace(" ", "_") for c in nuevo_df.columns]
+            nuevo_df.to_sql('atenciones', con=engine, if_exists='append', index=False)
+            st.success("¡Datos guardados permanentemente en PostgreSQL!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error al guardar los datos: {e}")
+
+# ---------------------------------------------------------
+# 6. DASHBOARDS Y FILTROS
+# ---------------------------------------------------------
+if not df.empty:
+    st.subheader("🔍 Filtros Dinámicos")
+    col_f1, col_f2, col_f3 = st.columns(3)
+
+    with col_f1:
+        eps_selected = st.multiselect("Filtrar por EPS:", options=df['eps'].unique(), default=df['eps'].unique())
+    with col_f2:
+        estado_selected = st.multiselect("Estado de Cita:", options=df['estado_cita'].unique(), default=df['estado_cita'].unique())
+    with col_f3:
+        prof_selected = st.multiselect("Profesional:", options=df['profesional'].unique(), default=df['profesional'].unique())
+
+    df_filtered = df[
+        (df['eps'].isin(eps_selected)) & 
+        (df['estado_cita'].isin(estado_selected)) &
+        (df['profesional'].isin(prof_selected))
+    ]
+
+    st.divider()
+
+    k1, k2, k3, k4 = st.columns(4)
+    total_citas = len(df_filtered)
+    atendidas = len(df_filtered[df_filtered['estado_cita'] == 'ATENDIDA'])
+    inasistencias = len(df_filtered[df_filtered['estado_cita'] == 'INASISTENCIA'])
+    tasa_atencion = round((atendidas / total_citas * 100), 1) if total_citas > 0 else 0
+
+    k1.metric("Total Citas", total_citas)
+    k2.metric("Citas Atendidas", atendidas)
+    k3.metric("Inasistencias", inasistencias)
+    k4.metric("% Cumplimiento", f"{tasa_atencion}%")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.write("### Citas por EPS")
+        st.bar_chart(df_filtered['eps'].value_counts())
+    with g2:
+        st.write("### Distribución por Estado de Cita")
+        st.bar_chart(df_filtered['estado_cita'].value_counts())
+
+    st.divider()
+    pdf_file = generar_pdf(df_filtered, atendidas, inasistencias, total_citas)
+    st.download_button(
+        label="📲 Exportar Dashboard a PDF",
+        data=pdf_file,
+        file_name=f"Reporte_IPS_{datetime.now().strftime('%Y%m%d')}.pdf",
+        mime="application/pdf"
+    )
+else:
+    st.warning("No hay datos disponibles en la base de datos.")
